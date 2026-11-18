@@ -1,18 +1,21 @@
-// Renders design/front.html to ../entry.png at exactly 1024x1024 with headless Chrome,
-// then checks the file against the contest gate (whole PNG, <= 1 MiB, <= 1024x1024).
+// Renders a design page to a PNG at exactly 1024x1024 with headless Chrome, then checks the
+// file against the contest gate (whole PNG, <= 1 MiB, <= 1024x1024).
 //
-//   node design/render.mjs            (from the repository root)
+//   node design/render.mjs                     front.html  -> entry.png (the dense front page)
+//   node design/render.mjs poster.html v1.png  any page    -> any output, both relative to design/
 //
 // Build-time only: the graded program (main.ts) never runs this, it just copies entry.png.
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync, existsSync } from 'node:fs';
+import { readFileSync, statSync, existsSync, rmSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const html = join(here, 'front.html');
-const out = join(here, '..', 'entry.png');
+const [page = 'front.html', target] = process.argv.slice(2);
+const html = resolve(here, page);
+const out = target ? resolve(here, target) : join(here, '..', 'entry.png');
 const SIZE = 1024;
 const MAX_BYTES = 1024 * 1024;
 
@@ -25,17 +28,29 @@ const chromeCandidates = [
 const chrome = chromeCandidates.find((p) => existsSync(p));
 if (!chrome) throw new Error('No Chrome found; set CHROME_BIN');
 
-execFileSync(chrome, [
-  '--headless=new',
-  '--disable-gpu',
-  '--hide-scrollbars',
-  '--force-device-scale-factor=1',
-  '--default-background-color=00000000',
-  `--window-size=${SIZE},${SIZE}`,
-  `--screenshot=${out}`,
-  '--virtual-time-budget=2000',
-  pathToFileURL(html).href,
-], { stdio: 'inherit' });
+// A fresh profile per run, and the old image removed first: Chrome sometimes exits non-zero from its
+// teardown watchdog after the screenshot is already written, so success is judged by the new file.
+rmSync(out, { force: true });
+const profile = mkdtempSync(join(tmpdir(), 'render-chrome-'));
+try {
+  execFileSync(chrome, [
+    '--headless=new',
+    '--disable-gpu',
+    '--hide-scrollbars',
+    '--force-device-scale-factor=1',
+    '--default-background-color=00000000',
+    `--user-data-dir=${profile}`,
+    `--window-size=${SIZE},${SIZE}`,
+    `--screenshot=${out}`,
+    '--virtual-time-budget=2000',
+    pathToFileURL(html).href,
+  ], { stdio: ['ignore', 'inherit', 'ignore'] });
+} catch (err) {
+  if (!existsSync(out)) throw err;
+  console.warn(`chrome exited with status ${err.status} after writing the screenshot; continuing`);
+} finally {
+  rmSync(profile, { recursive: true, force: true });
+}
 
 // Gate checks: PNG signature, IHDR dimensions, byte size.
 const buf = readFileSync(out);
